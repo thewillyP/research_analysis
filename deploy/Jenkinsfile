@@ -19,7 +19,7 @@ pipeline {
         SCRATCH_DIR = "/scratch/${SSH_USER}"
         LOG_DIR = "/vast/${SSH_USER}/logs"
         SIF_PATH = "${SCRATCH_DIR}/images/${IMAGE}.sif"
-        DOCKER_URL = "docker://thewillyp/analysis:${params.VARIANT}"
+        DOCKER_URL = "docker://thewillyp/devenv:${params.VARIANT}"
         SCRIPT_BASE_URL = 'https://raw.githubusercontent.com/thewillyP/research_analysis/main/deploy'
         TMP_DIR = "${SCRATCH_DIR}/tmp"
     }
