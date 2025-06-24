@@ -1,24 +1,28 @@
 import psycopg2
 import polars as pl
-import json
-from typing import List, Dict, Callable, Any
 import os
+from typing import List, Dict, Any, Union
+
+
+def normalize_field(f: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+    if isinstance(f, str):
+        return {"field": f, "type": "json" if "." in f else "row"}
+    elif isinstance(f, dict):
+        result = f.copy()
+        if "fn" in result:
+            result.setdefault("type", "function")
+        else:
+            result.setdefault("type", "json" if "." in result["field"] else "row")
+        return result
+    else:
+        raise ValueError(f"Invalid field format: {f}")
 
 
 def query_runs(
-    select_fields: List[Dict[str, Any]], filter_conditions: List[Dict[str, Any]], group_by_fields: List[Dict[str, Any]]
+    select_fields: List[Union[str, Dict[str, Any]]],
+    filter_conditions: List[Union[str, Dict[str, Any]]],
+    group_by_fields: List[Union[str, Dict[str, Any]]],
 ) -> pl.DataFrame:
-    """
-    Query runs with flexible selection, filtering, and grouping on row, JSONB, or parquet-derived fields.
-
-    Args:
-        select_fields: List of dicts with 'field' (row/json path), 'type' (row/json/function), optional 'fn' for function
-        filter_conditions: List of dicts with 'field', 'type', 'value', optional 'fn' for function
-        group_by_fields: List of dicts with 'field', 'type', optional 'fn' for function
-
-    Returns:
-        Polars DataFrame with query results
-    """
     conn = psycopg2.connect(
         host=os.getenv("DB_HOST"),
         port=os.getenv("PGPORT"),
@@ -28,59 +32,87 @@ def query_runs(
     )
     cur = conn.cursor()
 
-    # Default fields if none specified
-    select_fields = select_fields or [{"field": "id", "type": "row"}]
+    # Normalize input
+    select_fields = [normalize_field(f) for f in (select_fields or ["id"])]
+    filter_conditions = [normalize_field(f) for f in (filter_conditions or [])]
+    group_by_fields = [normalize_field(f) for f in (group_by_fields or [])]
 
-    # Build SELECT clause
-    select_clause = []
+    # Build expressions for SELECT
+    select_exprs = []
     parquet_selects = []
+    expr_to_alias = {}
+
     for sel in select_fields:
         if sel["type"] == "row":
-            select_clause.append(sel["field"])
+            expr = sel["field"]
         elif sel["type"] == "json":
             parts = sel["field"].split(".", 1)
-            select_clause.append(f"{parts[0]} ->> '{parts[1]}' AS {sel['field'].replace('.', '_')}")
+            expr = f"{parts[0]} ->> '{parts[1]}'"
         elif sel["type"] == "function":
-            select_clause.append("id")  # Need ID to correlate with parquet results
+            expr = "id"
             parquet_selects.append(sel)
+        else:
+            continue
+        # Set a clean alias
+        alias = expr.replace("->>", "_").replace("'", "").replace(".", "_").replace(" ", "")
+        expr_to_alias[expr] = alias
+        select_exprs.append(expr)
 
-    select_clause = ", ".join(select_clause) or "id"
+    select_exprs.append("file_path")
+    expr_to_alias["file_path"] = "file_path"
 
-    # Build WHERE clause
+    # WHERE clause
     where_clause = []
     params = []
     parquet_filters = []
-    for filt in filter_conditions or []:
-        if filt["type"] in ["row", "json"]:
-            if filt["type"] == "row":
-                where_clause.append(f"{filt['field']} = %s")
-            else:
-                parts = filt["field"].split(".", 1)
-                where_clause.append(f"{parts[0]} ->> '{parts[1]}' = %s")
+
+    for filt in filter_conditions:
+        operator = filt.get("operator", "=")
+        if filt["type"] == "row":
+            where_clause.append(f"{filt['field']} {operator} %s")
+            params.append(filt["value"])
+        elif filt["type"] == "json":
+            parts = filt["field"].split(".", 1)
+            where_clause.append(f"{parts[0]} ->> '{parts[1]}' {operator} %s")
             params.append(filt["value"])
         elif filt["type"] == "function":
             parquet_filters.append(filt)
 
     where_clause_str = " AND ".join(where_clause) if where_clause else "1=1"
 
-    # Build GROUP BY clause
+    # GROUP BY clause
     group_by_clause = ""
+    grouped_exprs = set()
     parquet_groups = []
-    if group_by_fields:
-        group_by_clause = "GROUP BY " + ", ".join(
-            g["field"] if g["type"] in ["row", "json"] else "id" for g in group_by_fields
-        )
-        select_clause = ", ".join(
-            f"ARRAY_AGG({s}) AS {s}_array"
-            if any(s == g["field"] for g in group_by_fields if g["type"] in ["row", "json"])
-            else s
-            for s in select_clause.split(", ")
-        )
-        parquet_groups = [g for g in group_by_fields if g["type"] == "function"]
 
-    # Execute SQL query
+    if group_by_fields:
+        group_items = []
+        for g in group_by_fields:
+            if g["type"] == "row":
+                expr = g["field"]
+            elif g["type"] == "json":
+                parts = g["field"].split(".", 1)
+                expr = f"{parts[0]} ->> '{parts[1]}'"
+            else:
+                expr = "id"
+                parquet_groups.append(g)
+            group_items.append(expr)
+            grouped_exprs.add(expr)
+        group_by_clause = f"GROUP BY {', '.join(group_items)}"
+
+    # Final SELECT clause
+    final_selects = []
+    for expr in select_exprs:
+        alias = expr_to_alias[expr]
+        if group_by_fields and expr not in grouped_exprs:
+            final_selects.append(f"ARRAY_AGG({expr}) AS {alias}_agg")
+        else:
+            final_selects.append(f"{expr} AS {alias}")
+
+    select_clause_str = ", ".join(final_selects)
+
     query = f"""
-        SELECT {select_clause}, file_path
+        SELECT {select_clause_str}
         FROM runs
         WHERE {where_clause_str}
         {group_by_clause};
@@ -90,27 +122,24 @@ def query_runs(
     rows = cur.fetchall()
     columns = [desc[0] for desc in cur.description]
 
-    # Convert to Polars DataFrame
-    df = pl.DataFrame(rows, schema=columns)
+    df = pl.DataFrame(rows, schema=columns, orient="row")
 
-    # Process parquet-based operations
+    # Parquet logic
     if parquet_selects or parquet_filters or parquet_groups:
         result_rows = []
         for row in rows:
-            file_path = row[-1]  # file_path is last column
-            run_id = row[columns.index("id")]
+            file_path = row[columns.index("file_path")]
+            run_id = row[columns.index("id")] if "id" in columns else None
             try:
                 parquet_df = pl.read_parquet(file_path)
 
-                # Apply parquet filters
                 filtered_df = parquet_df
                 for filt in parquet_filters:
                     result = filt["fn"](filtered_df)
                     if not isinstance(result, bool) or not result:
                         filtered_df = filtered_df.filter(pl.lit(False))
 
-                # Apply parquet selects
-                row_data = {col: val for col, val in zip(columns[:-1], row[:-1])}
+                row_data = {col: val for col, val in zip(columns, row)}
                 for sel in parquet_selects:
                     result = sel["fn"](filtered_df)
                     row_data[sel["field"]] = result
@@ -121,7 +150,6 @@ def query_runs(
 
         df = pl.DataFrame(result_rows)
 
-        # Apply parquet grouping
         if parquet_groups:
             group_cols = [g["field"] for g in group_by_fields if g["type"] in ["row", "json"]]
             parquet_group_cols = [g["field"] for g in parquet_groups]
@@ -138,13 +166,13 @@ def query_runs(
 if __name__ == "__main__":
     result = query_runs(
         select_fields=[
-            {"field": "id", "type": "row"},
-            {"field": "entity", "type": "row"},
-            {"field": "project", "type": "row"},
-            {"field": "summary.test_accuracy", "type": "json"},
-            {"field": "config.lr", "type": "json"},
+            "id",
+            "entity",
+            "project",
+            "summary.test_accuracy",
+            "config.meta_optimizer",
         ],
-        filter_conditions=[],
+        filter_conditions=[{"field": "summary.test_accuracy", "value": "0.85", "operator": "!="}],
         group_by_fields=[],
     )
     print(result)
