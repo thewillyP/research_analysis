@@ -135,28 +135,16 @@ def query_runs(
     return df
 
 
-# Example usage:
 if __name__ == "__main__":
-
-    def gradient_mean(df: pl.DataFrame) -> float:
-        return df["oho_gradient"].mean()
-
-    def high_gradient(df: pl.DataFrame) -> bool:
-        return df["oho_gradient"].mean() > 0.1
-
     result = query_runs(
         select_fields=[
             {"field": "id", "type": "row"},
-            {"field": "summary.accuracy", "type": "json"},
-            {"field": "gradient_mean", "type": "function", "fn": gradient_mean},
-        ],
-        filter_conditions=[
-            {"field": "project", "type": "row", "value": "oho_exps"},
-            {"field": "high_gradient", "type": "function", "fn": high_gradient},
-        ],
-        group_by_fields=[
+            {"field": "entity", "type": "row"},
             {"field": "project", "type": "row"},
-            {"field": "gradient_mean", "type": "function", "fn": gradient_mean},
+            {"field": "summary.test_accuracy", "type": "json"},
+            {"field": "config.lr", "type": "json"},
         ],
+        filter_conditions=[],
+        group_by_fields=[],
     )
     print(result)

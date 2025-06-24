@@ -49,6 +49,10 @@ def store_run(run, file_path):
     )
     cur = conn.cursor()
 
+    # Convert summary and config to JSON-serializable dictionaries
+    summary_dict = run.summary._json_dict
+    config_dict = dict(run.config)
+
     cur.execute(
         """
         INSERT INTO runs (id, entity, project, group_name, url, summary, config, file_path)
@@ -62,7 +66,16 @@ def store_run(run, file_path):
             config = EXCLUDED.config,
             file_path = EXCLUDED.file_path;
     """,
-        (run.id, run.entity, run.project, run.group, run.url, Json(run.summary), Json(run.config), file_path),
+        (
+            run.id,
+            run.entity,
+            run.project,
+            run.group,
+            run.url,
+            Json(summary_dict),
+            Json(config_dict),
+            file_path,
+        ),
     )
 
     conn.commit()
@@ -75,7 +88,11 @@ def process_run(run, root_dir):
         api = wandb.Api()
         artifact_name = f"{run.entity}/{run.project}/run-{run.id}-history:v0"
         artifact = api.artifact(artifact_name)
-        download_path = artifact.download(root=root_dir, path_prefix="0000.parquet")
+
+        # Download to a run-specific directory, only the 0000.parquet file
+        run_dir = os.path.join(root_dir, f"run-{run.id}")
+        os.makedirs(run_dir, exist_ok=True)
+        download_path = artifact.download(root=run_dir, path_prefix="0000.parquet")
         store_run(run, f"{download_path}/0000.parquet")
         print(f"Processed run {run.id}")
     except Exception as e:
@@ -93,7 +110,7 @@ def main():
     create_table()
 
     api = wandb.Api()
-    filters = {"project": args.project}
+    filters = {}
     if args.group:
         filters["group"] = args.group
     runs = api.runs(f"{args.entity}/{args.project}", filters)
