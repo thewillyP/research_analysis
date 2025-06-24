@@ -90,12 +90,13 @@ pipeline {
 
                     if (params.FORCE_REBUILD || exists == "missing") {
                         echo "Submitting sbatch build job for image..."
-                        env.BUILD_JOB_ID = sh(
+                        def buildOutput = sh(
                             script: """
                             ssh -o StrictHostKeyChecking=no ${SSH_USER}@${EXEC_HOST} 'curl -s ${SCRIPT_BASE_URL}/build_image.sh | bash -s ${SCRATCH_DIR} ${SIF_PATH} ${DOCKER_URL} ${LOG_DIR} ${IMAGE} ${params.OVERLAY_SIZE}'
                             """,
                             returnStdout: true
                         ).trim()
+                        env.BUILD_JOB_ID = (buildOutput =~ /Submitted batch job (\d+)/)?.getAt(0)?.getAt(1) ?: ""
                         echo "Build job submitted with ID: ${env.BUILD_JOB_ID}"
                     } else {
                         echo "Singularity image already exists: ${SIF_PATH}. Skipping build."
@@ -123,13 +124,12 @@ pipeline {
                     string(credentialsId: 'postgres_port', variable: 'PGPORT')
                 ]) {
                     script {
-                        def dependency = env.BUILD_JOB_ID ? "--dependency=afterok:${env.BUILD_JOB_ID}" : ""
                         def postgres_user = env.DB_HOST ? POSTGRES_USER : ""
                         def postgres_password = env.DB_HOST ? POSTGRES_PASSWORD : ""
                         def postgres_db = env.DB_HOST ? POSTGRES_DB : ""
                         def pgport = env.DB_HOST ? PGPORT : ""
                         sh """
-                        ssh -o StrictHostKeyChecking=no ${SSH_USER}@${EXEC_HOST} 'curl -s ${SCRIPT_BASE_URL}/run_job.sh | bash -s "${LOG_DIR}" "${SIF_PATH}" "${SSH_USER}" "${VARIANT}" "${dependency}" "${env.DB_HOST}" "${postgres_user}" "${postgres_password}" "${postgres_db}" "${pgport}" "${IMAGE}" "${TMP_DIR}" "${params.JOB_RUNTIME}" "${params.GPU_COUNT}" "${params.MEMORY}" "${params.CPU_COUNT}" "${params.PYTHON_TASKS}"'
+                        ssh -o StrictHostKeyChecking=no ${SSH_USER}@${EXEC_HOST} 'curl -s ${SCRIPT_BASE_URL}/run_job.sh | bash -s "${LOG_DIR}" "${SIF_PATH}" "${SSH_USER}" "${VARIANT}" "${env.BUILD_JOB_ID}" "${env.DB_HOST}" "${postgres_user}" "${postgres_password}" "${postgres_db}" "${pgport}" "${IMAGE}" "${TMP_DIR}" "${params.JOB_RUNTIME}" "${params.GPU_COUNT}" "${params.MEMORY}" "${params.CPU_COUNT}" "${params.PYTHON_TASKS}"'
                         """
                     }
                 }

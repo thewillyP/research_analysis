@@ -3,7 +3,7 @@ LOG_DIR=$1
 SIF_PATH=$2
 SSH_USER=$3
 VARIANT=$4
-DEPENDENCY=$5
+BUILD_JOB_ID=$5
 DB_HOST=$6
 POSTGRES_USER=$7
 POSTGRES_PASSWORD=$8
@@ -26,6 +26,13 @@ else
     GPU_SINGULARITY=""
 fi
 
+# Set dependency if BUILD_JOB_ID is provided
+if [ -n "$BUILD_JOB_ID" ]; then
+    SLURM_DEPENDENCY="#SBATCH --dependency=afterok:$BUILD_JOB_ID"
+else
+    SLURM_DEPENDENCY=""
+fi
+
 # Create temporary script to run all Python tasks
 TASK_SCRIPT="${TMP_DIR}/run_tasks_${IMAGE}.sh"
 echo "#!/bin/bash" > "${TASK_SCRIPT}"
@@ -40,6 +47,7 @@ for task in "${TASKS[@]}"; do
 done
 chmod +x "${TASK_SCRIPT}"
 
+# Submit SLURM job
 sbatch <<EOF
 #!/bin/bash
 #SBATCH --job-name=analysis_run_${IMAGE}
@@ -51,7 +59,7 @@ sbatch <<EOF
 #SBATCH --output=${LOG_DIR}/task-${IMAGE}-%j.log
 #SBATCH --error=${LOG_DIR}/task-${IMAGE}-%j.err
 ${GPU_SLURM}
-${DEPENDENCY}
+${SLURM_DEPENDENCY}
 
 singularity exec ${GPU_SINGULARITY} \\
   --containall --no-home --cleanenv \\
